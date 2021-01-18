@@ -1868,8 +1868,6 @@ void t_go_generator::generate_go_struct_deepequal(ostream& out,
 
   string field_name;
   string escape_field_name;
-  // t_const_value* field_default_value;
-  t_field::e_req field_required;
   int32_t field_id = -1;
   out << indent() << "if p == nil {" << endl;
   indent_up();
@@ -1912,7 +1910,6 @@ void t_go_generator::generate_go_struct_deepequal(ostream& out,
     escape_field_name = escape_string(field_name);
     t_type* ttype = (*f_iter)->get_type();
     string goType = type_to_go_type_with_opt(ttype, is_pointer_field(*f_iter));
-    field_required = (*f_iter)->get_req();
     int32_t field_method_identiter = field_id;
 
     if (field_method_identiter < 0) {
