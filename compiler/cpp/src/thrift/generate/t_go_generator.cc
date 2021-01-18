@@ -152,6 +152,10 @@ public:
                                  const string& tstruct_name,
                                  bool is_result = false,
                                  bool uses_countsetfields = false);
+  void generate_go_struct_deepequal(std::ostream& out,
+                                 t_struct* tstruct,
+                                 const string& tstruct_name,
+                                 bool is_args_or_result = false);
   void generate_go_function_helpers(t_function* tfunction);
   void get_publicized_name_and_def_value(t_field* tfield,
                                          string* OUT_pub_name,
@@ -307,6 +311,7 @@ private:
   std::set<std::string> package_identifiers_set_;
   std::string read_method_name_;
   std::string write_method_name_;
+  std::string deepequal_method_name_;
 
   std::set<std::string> commonInitialisms;
 
@@ -724,6 +729,7 @@ void t_go_generator::init_generator() {
     read_method_name_ = "Read";
     write_method_name_ = "Write";
   }
+  deepequal_method_name_ = "Equals";
 
   while (true) {
     // TODO: Do better error checking here.
@@ -1482,6 +1488,7 @@ void t_go_generator::generate_go_struct_definition(ostream& out,
   generate_isset_helpers(out, tstruct, tstruct_name, is_result);
   generate_go_struct_reader(out, tstruct, tstruct_name, is_result);
   generate_go_struct_writer(out, tstruct, tstruct_name, is_result, num_setable > 0);
+  generate_go_struct_deepequal(out, tstruct, tstruct_name, is_result || is_args);
 
   out << indent() << "func (p *" << tstruct_name << ") String() string {" << endl;
   out << indent() << "  if p == nil {" << endl;
@@ -1836,6 +1843,88 @@ void t_go_generator::generate_go_struct_writer(ostream& out,
 
     indent_down();
     out << indent() << "  return err" << endl;
+    out << indent() << "}" << endl << endl;
+  }
+}
+
+void t_go_generator::generate_go_struct_deepequal(ostream& out,
+                                               t_struct* tstruct,
+                                               const string& tstruct_name,
+                                               bool is_args_or_result) {
+  if (is_args_or_result) {
+    return;
+  }
+  string name(tstruct->get_name());
+  const vector<t_field*>& fields = tstruct->get_sorted_members();
+  vector<t_field*>::const_iterator f_iter;
+  indent(out) << "func (p *" << tstruct_name << ") " << deepequal_method_name_ << "(other *" << tstruct_name << ") bool {" << endl;
+  indent_up();
+
+  string field_name;
+  string escape_field_name;
+  // t_const_value* field_default_value;
+  t_field::e_req field_required;
+  int32_t field_id = -1;
+  out << indent() << "if p == nil {" << endl;
+  indent_up();
+  out << indent() << "if other == nil {" << endl;
+  indent_up();
+  out << indent() << "return true" << endl;
+  indent_down();
+  out << indent() << "}" << endl;
+  out << indent() << "return false" << endl;
+  indent_down();
+  out << indent() << "}" << endl;
+
+  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
+    string field_method_prefix("Field");
+    string field_method_suffix("Equals");
+    field_name = (*f_iter)->get_name();
+    escape_field_name = escape_string(field_name);
+    field_id = (*f_iter)->get_key();
+    int32_t field_method_identiter = field_id;
+
+    if (field_method_identiter < 0) {
+      field_method_prefix += "_";
+      field_method_identiter *= -1;
+    }
+
+    out << indent() << "if err := p." << field_method_prefix << field_method_identiter << field_method_suffix
+        << "(ctx, oprot); err != nil { return err }" << endl;
+  }
+
+  // Write the struct map
+  out << indent() << "if err := oprot.WriteFieldStop(ctx); err != nil {" << endl;
+  out << indent() << "  return thrift.PrependError(\"write field stop error: \", err) }" << endl;
+  out << indent() << "if err := oprot.WriteStructEnd(ctx); err != nil {" << endl;
+  out << indent() << "  return thrift.PrependError(\"write struct stop error: \", err) }" << endl;
+  out << indent() << "return nil" << endl;
+  indent_down();
+  out << indent() << "}" << endl << endl;
+
+  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
+    string field_method_prefix("Field");
+    string field_method_suffix("Equals");
+    field_id = (*f_iter)->get_key();
+    field_name = (*f_iter)->get_name();
+    escape_field_name = escape_string(field_name);
+    string goType = type_to_go_type_with_opt((*f_iter)->get_type(), is_pointer_field(*f_iter));
+    field_required = (*f_iter)->get_req();
+    int32_t field_method_identiter = field_id;
+
+    if (field_method_identiter < 0) {
+      field_method_prefix += "_";
+      field_method_identiter *= -1;
+    }
+    out << indent() << "func (p *" << tstruct_name << ") " << field_method_prefix << field_method_identiter << field_method_suffix
+        << "(other " << goType << ") bool {" << endl;
+    indent_up();
+
+    // Write field contents
+    generate_serialize_field(out, *f_iter, "p.");
+
+    indent_down();
+    out << indent() << "  return true" << endl;
     out << indent() << "}" << endl << endl;
   }
 }
