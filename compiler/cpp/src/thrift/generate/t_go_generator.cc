@@ -233,6 +233,12 @@ public:
 
   void generate_serialize_list_element(std::ostream& out, t_list* tlist, std::string iter);
 
+  void generate_go_deepequal(std::ostream& out, t_type* ttype, string tgt, string src);
+
+  void generate_go_deepequal_struct(std::ostream& out, t_type* ttype, string tgt, string src);
+
+  void generate_go_deepequal_container(std::ostream& out, t_type* ttype, string tgt, string src);
+
   void generate_go_docstring(std::ostream& out, t_struct* tstruct);
 
   void generate_go_docstring(std::ostream& out, t_function* tfunction);
@@ -1876,6 +1882,7 @@ void t_go_generator::generate_go_struct_deepequal(ostream& out,
   indent_down();
   out << indent() << "}" << endl;
 
+
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
     string field_method_prefix("Field");
     string field_method_suffix("Equals");
@@ -1889,16 +1896,11 @@ void t_go_generator::generate_go_struct_deepequal(ostream& out,
       field_method_identiter *= -1;
     }
 
-    out << indent() << "if err := p." << field_method_prefix << field_method_identiter << field_method_suffix
-        << "(ctx, oprot); err != nil { return err }" << endl;
+    out << indent() << "if !p." << field_method_prefix << field_method_identiter << field_method_suffix
+        << "(other." << escape_field_name << ") { return false }" << endl;
   }
 
-  // Write the struct map
-  out << indent() << "if err := oprot.WriteFieldStop(ctx); err != nil {" << endl;
-  out << indent() << "  return thrift.PrependError(\"write field stop error: \", err) }" << endl;
-  out << indent() << "if err := oprot.WriteStructEnd(ctx); err != nil {" << endl;
-  out << indent() << "  return thrift.PrependError(\"write struct stop error: \", err) }" << endl;
-  out << indent() << "return nil" << endl;
+  out << indent() << "return true" << endl;
   indent_down();
   out << indent() << "}" << endl << endl;
 
@@ -1908,7 +1910,8 @@ void t_go_generator::generate_go_struct_deepequal(ostream& out,
     field_id = (*f_iter)->get_key();
     field_name = (*f_iter)->get_name();
     escape_field_name = escape_string(field_name);
-    string goType = type_to_go_type_with_opt((*f_iter)->get_type(), is_pointer_field(*f_iter));
+    t_type* ttype = (*f_iter)->get_type();
+    string goType = type_to_go_type_with_opt(ttype, is_pointer_field(*f_iter));
     field_required = (*f_iter)->get_req();
     int32_t field_method_identiter = field_id;
 
@@ -1920,8 +1923,14 @@ void t_go_generator::generate_go_struct_deepequal(ostream& out,
         << "(other " << goType << ") bool {" << endl;
     indent_up();
 
-    // Write field contents
-    generate_serialize_field(out, *f_iter, "p.");
+    string tgt = "p."+escape_field_name;
+    string src = "other";
+    if (is_pointer_field(*f_iter) && (ttype->is_base_type() || ttype->is_enum())) {
+      tgt += "*";
+      src += "*";
+    }
+    // Compare field contents
+    generate_go_deepequal(out, (*f_iter)->get_type(), "p."+escape_field_name, "other");
 
     indent_down();
     out << indent() << "  return true" << endl;
@@ -3452,10 +3461,23 @@ void t_go_generator::generate_serialize_container(ostream& out,
     if (pointer_field) {
       wrapped_prefix = "(" + prefix + ")";
     }
-    out << indent() << "    if reflect.DeepEqual(" << wrapped_prefix << "[i]," << wrapped_prefix << "[j]) { " << endl;
-    out << indent() << "      return thrift.PrependError(\"\", fmt.Errorf(\"%T error writing set field: slice is not unique\", " << wrapped_prefix << "[i]))" << endl;
-    out << indent() << "    }" << endl;
-    out << indent() << "  }" << endl;
+    string goType = type_to_go_type(tset->get_elem_type());
+    out << indent() << "for i := 0; i<len(" << prefix << "); i++ {" << endl;
+    indent_up();
+    out << indent() << "for j := i+1; j<len(" << prefix << "); j++ {" << endl;
+    indent_up();
+    out << indent() << "if !func(tgt, src " << goType << ") {";
+    indent_up();
+    generate_go_deepequal(out, tset->get_elem_type(), "tgt", "src");
+    indent_down();
+    out << indent() << "}(" << wrapped_prefix << "[i]," << wrapped_prefix << "[j]) { " << endl;
+    indent_up();
+    out << indent() << "return thrift.PrependError(\"\", fmt.Errorf(\"%T error writing set field: slice is not unique\", " << wrapped_prefix << "))" << endl;
+    indent_down();
+    out << indent() << "}" << endl;
+    indent_down();
+    out << indent() << "}" << endl;
+    indent_down();
     out << indent() << "}" << endl;
     out << indent() << "for _, v := range " << prefix << " {" << endl;
     indent_up();
@@ -3519,6 +3541,91 @@ void t_go_generator::generate_serialize_list_element(ostream& out, t_list* tlist
   t_field efield(tlist->get_elem_type(), "");
   efield.set_req(t_field::T_OPT_IN_REQ_OUT);
   generate_serialize_field(out, &efield, prefix);
+}
+
+/**
+ * Compares any type
+ */
+void t_go_generator::generate_go_deepequal(std::ostream& out, t_type* ttype, string tgt, string src) {
+
+  // Do nothing for void types
+  if (ttype->is_void()) {
+    throw "compiler error: cannot generate equals for void type: " + tgt;
+  }
+
+  if (ttype->is_struct() || ttype->is_xception()) {
+    generate_go_deepequal_struct(out, ttype, tgt, src);
+  } else if (ttype->is_container()) {
+    generate_go_deepequal_container(out, ttype, tgt, src);
+  } else if (ttype->is_base_type() || ttype->is_enum()) {
+    if (ttype->is_base_type()) {
+      out << indent() << "if ";
+
+      t_base_type::t_base tbase = ((t_base_type*)ttype)->get_base();
+      switch (tbase) {
+      case t_base_type::TYPE_VOID:
+        throw "compiler error: cannot equals void: " + tgt;
+        break;
+
+      case t_base_type::TYPE_STRING:
+        if (ttype->is_binary()) {
+          out << "bytes.Compare("<< tgt << ", " << src << ") != 0";
+        } else {
+          out << tgt << " != " << src;
+        }
+        break;
+
+      case t_base_type::TYPE_BOOL:
+      case t_base_type::TYPE_I8:
+      case t_base_type::TYPE_I16:
+      case t_base_type::TYPE_I32:
+      case t_base_type::TYPE_I64:
+      case t_base_type::TYPE_DOUBLE:
+        out << tgt << " != " << src;
+      default:
+        throw "compiler error: no Go name for base type " + t_base_type::t_base_name(tbase);
+      }
+    } else if (ttype->is_enum()) {
+      out << tgt << " != " << src;
+    }
+
+    out << " { return false }" << endl;
+  } else {
+    throw "compiler error: Invalid type in generate_go_deepequal '" + ttype->get_name()
+        + "' for '" + tgt + "'";
+  }
+}
+
+/**
+ * Compares the members of a struct
+ */
+void t_go_generator::generate_go_deepequal_struct(std::ostream& out, t_type* ttype, string tgt, string src) {
+  out << indent() << "if ! " << tgt << ".Equals(" << src << ") { return false }" << endl;
+}
+
+/**
+ * Compares any container type
+ */
+void t_go_generator::generate_go_deepequal_container(std::ostream& out, t_type* ttype, string tgt, string src) {
+  if (ttype->is_map()) {
+    t_map* tmap = (t_map*)ttype;
+    out << indent() << "for k, _tgt := range " << tgt << " {" << endl;
+    indent_up();
+    string element_source = tmp("_src");
+    out << indent() << element_source << " := " << src << "[k]" << endl;
+    generate_go_deepequal(out, ((t_map*)ttype)->get_val_type(), "_tgt", element_source);
+    indent_down();
+    indent(out) << "}" << endl;
+  } else if (ttype->is_list() || ttype->is_set()) {
+    t_list* tlist = (t_list*)ttype;
+    out << indent() << "for i, _tgt := range " << tgt << " {" << endl;
+    indent_up();
+    string element_source = tmp("_src");
+    out << indent() << element_source << " := " << src << "[i]" << endl;
+    generate_go_deepequal(out, tlist, "_tgt", element_source);
+    indent_down();
+    indent(out) << "}" << endl;
+  }
 }
 
 /**
